@@ -66,23 +66,31 @@ function np(p) {
 function derive(p, ftp) { const n = np(p), IF = n / ftp; return { np: n, if: IF, tss: (p.length / 3600) * IF * IF * 100 } }
 
 // ---------- .zwo parsing (port of zwo.rs) ----------
+// Lenient like Zwift itself: real-world files omit sportType, use PowerLow/PowerHigh on SteadyState,
+// PowerOnLow/PowerOffLow on IntervalsT, fractional durations, and unescaped '&' in names.
 function parseZwo(text, fileName) {
+  text = text.replace(/&(?!(?:[a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   if (doc.querySelector('parsererror')) throw new Error('invalid XML');
-  const root = doc.documentElement, kid = (t) => [...root.children].find((n) => n.tagName === t);
-  const sport = kid('sportType')?.textContent;
-  if (sport !== 'bike') throw new Error(sport ? 'not a bike workout' : 'no sport specified');
+  const root = doc.documentElement, kid = (t) => [...root.children].find((n) => n.tagName.toLowerCase() === t.toLowerCase());
+  const sport = kid('sportType')?.textContent.trim().toLowerCase();
+  if (sport && sport !== 'bike') throw new Error('not a bike workout (' + sport + ')');
   const w = kid('workout'); if (!w) throw new Error('missing workout block');
-  const num = (n, a, req = true) => { const v = n.getAttribute(a); if (v == null) { if (req) throw new Error('missing ' + a); return null } const x = Number(v); if (!isFinite(x)) throw new Error('invalid ' + a); return x };
+  const attr = (n, ...names) => { for (const a of names) { const v = n.getAttribute(a); if (v != null && v.trim() !== '' && isFinite(+v)) return +v } return null };
+  const req = (n, ...names) => { const v = attr(n, ...names); if (v == null) throw new Error(`${n.tagName} missing ${names[0]}`); return v };
+  const dur = (n, a = 'Duration') => Math.round(req(n, a));
   const blocks = [];
   for (const b of w.children) {
-    const t = b.tagName, label = b.getAttribute('name');
-    if (t === 'SteadyState') blocks.push({ dur: num(b, 'Duration'), p0: num(b, 'Power'), p1: num(b, 'Power'), label });
-    else if (t === 'Warmup' || t === 'Cooldown' || t === 'Ramp') blocks.push({ dur: num(b, 'Duration'), p0: num(b, 'PowerLow'), p1: num(b, 'PowerHigh'), label: label ?? (t === 'Ramp' ? null : t) });
-    else if (t === 'IntervalsT') {
-      const r = num(b, 'Repeat'), on = num(b, 'OnDuration'), off = num(b, 'OffDuration'), pon = num(b, 'OnPower'), poff = num(b, 'OffPower');
+    const t = b.tagName.toLowerCase(), label = b.getAttribute('name');
+    if (t === 'steadystate' || t === 'solidstate') { const lo = req(b, 'Power', 'PowerLow'); blocks.push({ dur: dur(b), p0: lo, p1: attr(b, 'Power', 'PowerHigh') ?? lo, label }) }
+    else if (t === 'warmup' || t === 'cooldown' || t === 'ramp') blocks.push({ dur: dur(b), p0: req(b, 'PowerLow', 'Power'), p1: req(b, 'PowerHigh', 'Power'), label: label ?? (t === 'ramp' ? null : t[0].toUpperCase() + t.slice(1)) });
+    else if (t === 'intervalst') {
+      const r = Math.round(attr(b, 'Repeat') ?? 1), on = dur(b, 'OnDuration'), off = dur(b, 'OffDuration');
+      const pon = req(b, 'OnPower', 'PowerOnHigh', 'PowerOnLow'), poff = req(b, 'OffPower', 'PowerOffLow', 'PowerOffHigh');
       for (let i = 0; i < r; i++) { blocks.push({ dur: on, p0: pon, p1: pon, label: `On ${i + 1}/${r}` }); blocks.push({ dur: off, p0: poff, p1: poff, label: 'Off' }) }
     }
+    // ponytail: free ride / max effort have no ERG target; held at 50% FTP so the workout keeps its real length
+    else if ((t === 'freeride' || t === 'maxeffort') && attr(b, 'Duration')) blocks.push({ dur: dur(b), p0: 0.5, p1: 0.5, label: t === 'freeride' ? 'Free ride' : 'Max effort' });
   }
   if (!blocks.length) throw new Error('no blocks');
   return { name: kid('name')?.textContent || fileName.replace(/\.zwo$/i, ''), description: kid('description')?.textContent || '', author: kid('author')?.textContent || '', blocks, file: fileName };
