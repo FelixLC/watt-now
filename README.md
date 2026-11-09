@@ -19,7 +19,7 @@ Then open http://localhost:8765. No trainer? Click **Use simulator**.
 - Trainer (FTMS), heart rate strap (HRS) and power meter (CPS) over Web Bluetooth. A power meter replaces the trainer's power reading.
 - `.zwo` workouts: pedal to start, auto-pause when you stop pedalling, a 15 s ramp back up on resume, skip block, audio cues.
 - Intensity bias during a workout (↑/↓), Space to pause and resume, screen kept awake.
-- Free ride in ERG, grade or resistance mode.
+- Free ride in ERG, grade or resistance mode, with 24 virtual gears in grade mode (for a single-speed like the Zwift Cog).
 - History with NP, IF, TSS, power graph, power and heart rate zones, and TCX export.
 
 Everything is stored in the browser's localStorage.

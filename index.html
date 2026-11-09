@@ -192,12 +192,15 @@ const ctl = (bytes) => { if (dev.cp) gatt(() => dev.cp.writeValueWithResponse(ne
 const i16 = (v) => [v & 0xff, (v >> 8) & 0xff];
 function setErg(w) { w = Math.round(w); dev.lastErg = w; dev.lastErgAt = Date.now(); ctl([0x05, ...i16(w)]) }
 // FTMS 0x11 simulation params: wind 0, grade (0.01 %), crr 0.004, cw 0.51 kg/m (Auuki defaults); 0x04 resistance (0.1 units)
-const setGrade = (g) => { dev.lastErg = null; ctl([0x11, 0, 0, ...i16(Math.round(g * 100)), 40, 51]) };
+// Virtual gears for a single-speed (Zwift Cog): gear 12 is the real gear; each gear is 10 % harder or easier.
+// ponytail: scales grade and rolling resistance by the ratio, not a drivetrain model; tune GEAR_STEP if gears feel off
+const GEARS = 24, GEAR_MID = 12, GEAR_STEP = 1.1, gearFactor = (n) => GEAR_STEP ** (n - GEAR_MID);
+const setGrade = (g, k = 1) => { dev.lastErg = null; ctl([0x11, 0, 0, ...i16(Math.round(g * k * 100)), Math.min(255, Math.round(40 * k)), 51]) };
 const setRes = (r) => { dev.lastErg = null; ctl([0x04, ...i16(Math.round(r * 10))]) };
 // Simulator: stands in for a trainer + HRM so the app is usable without hardware.
 setInterval(() => {
   if (!dev.sim) return;
-  const tgt = S?.mode === 'grade' ? 150 + S.manual * 25 : S?.mode === 'res' ? 80 + S.manual * 3 : dev.lastErg ?? 100;
+  const tgt = S?.mode === 'grade' ? (150 + S.manual * 25) * gearFactor(S.gear) : S?.mode === 'res' ? 80 + S.manual * 3 : dev.lastErg ?? 100;
   live.cad = dev.simPedal ? 88 + Math.round(Math.random() * 6 - 3) : 0;
   live.power = dev.simPedal ? Math.max(0, Math.round(tgt + (Math.random() * 16 - 8))) : 0;
   const hrTarget = 70 + (dev.simPedal ? 90 * tgt / cfg.ftp : 0);
@@ -215,7 +218,7 @@ let S = null;
 const FREE = { erg: { step: 10, min: 0, max: 1500, unit: 'W', start: () => Math.round(cfg.ftp * 0.6) }, grade: { step: 0.5, min: -10, max: 20, unit: '%', start: () => 0 }, res: { step: 5, min: 0, max: 100, unit: '', start: () => 20 } };
 function startSession(w, mode = 'workout') {
   const blocks = w.blocks.map((b) => ({ dur: b.dur, w0: Math.round(b.p0 * cfg.ftp), w1: Math.round(b.p1 * cfg.ftp), cad: b.cad ?? null, label: blockLabel(b) }));
-  S = { w, mode, manual: FREE[mode]?.start(), bias: 100, blocks, idx: 0, bEl: 0, total: 0, state: 'waiting', noPedal: 0, resumePedal: 0, byStall: false, byDropout: false, rampEl: 0, target: null, start: null, trace: [], rec: { p: [], h: [], c: [], t: [] }, timer: setInterval(tick, 1000) };
+  S = { w, mode, manual: FREE[mode]?.start(), gear: GEAR_MID, bias: 100, blocks, idx: 0, bEl: 0, total: 0, state: 'waiting', noPedal: 0, resumePedal: 0, byStall: false, byDropout: false, rampEl: 0, target: null, start: null, trace: [], rec: { p: [], h: [], c: [], t: [] }, timer: setInterval(tick, 1000) };
   S.target = computeTarget(); sendTarget(S.target); lockScreen(); view = 'session'; render();
 }
 // ponytail: free ride is a 4 h single-block "workout", so stall/pause/record logic is shared unchanged
@@ -227,10 +230,10 @@ function computeTarget() {
   const b = curBlock(); return b ? Math.max(0, Math.round((b.w0 + (b.w1 - b.w0) * S.bEl / b.dur) * S.bias / 100)) : S.target;
 }
 function sendTarget(w) {
-  const key = S.mode === 'grade' || S.mode === 'res' ? S.mode + S.manual : 'erg' + w, stale = Date.now() - dev.lastCtlAt >= 10000;  // 10 s keep-alive
+  const key = S.mode === 'grade' ? 'grade' + S.manual + '/' + S.gear : S.mode === 'res' ? 'res' + S.manual : 'erg' + w, stale = Date.now() - dev.lastCtlAt >= 10000;  // 10 s keep-alive
   if (key === dev.lastCtl && !stale) return;
   dev.lastCtl = key; dev.lastCtlAt = Date.now();
-  if (S.mode === 'grade') setGrade(S.manual); else if (S.mode === 'res') setRes(S.manual); else if (w != null) setErg(w);
+  if (S.mode === 'grade') setGrade(S.manual, gearFactor(S.gear)); else if (S.mode === 'res') setRes(S.manual); else if (w != null) setErg(w);
 }
 function adjust(dir) {
   if (!S || S.state === 'finished') return;
@@ -239,6 +242,7 @@ function adjust(dir) {
   if (S.state === 'running' || S.state === 'waiting') S.target = computeTarget();
   sendTarget(S.state === 'paused' ? rampFloor(computeTarget() ?? 0) : S.target); render();
 }
+function shift(dir) { if (S?.mode !== 'grade') return; S.gear = Math.max(1, Math.min(GEARS, S.gear + dir)); sendTarget(null); render() }
 function setMode(m) { S.mode = m; S.manual = FREE[m].start(); S.target = computeTarget(); sendTarget(S.target); render() }
 let wakeLock = null;
 async function lockScreen() { try { if (S && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock?.request('screen') } catch { } }
@@ -348,6 +352,7 @@ const V = {
     const cadTgt = wk ? b?.cad ?? null : null, idle = S.state !== 'running' && S.state !== 'ramping';
     const gauges = `<div class="tiles" style="margin-bottom:12px">${gauge('Power', live.power, tgt, 'W', tgt == null ? 0 : Math.max(5, tgt * 0.05), tgt == null ? 0 : Math.max(10, tgt * 0.1), idle)}${gauge('Cadence', live.cad == null ? null : Math.round(live.cad), cadTgt, 'rpm', 5, 10, idle)}</div>`;
     const controls = wk ? `<span style="flex:1">Intensity <b>${S.bias}%</b></span>` : `${Object.keys(FREE).map((m) => `<button class="${S.mode === m ? 'primary' : ''}" data-mode="${m}">${{ erg: 'ERG', grade: 'Grade', res: 'Resistance' }[m]}</button>`).join('')}<span style="flex:1;text-align:center;font-size:24px;font-weight:700">${S.manual}${f.unit}</span>`;
+    const gears = S.mode === 'grade' ? `<div class="card row"><span style="flex:1">Gear <b style="font-size:24px">${S.gear}</b><span class="mute"> / ${GEARS} · ${Math.round(gearFactor(S.gear) * 100)}% of real gear</span></span><button data-act="gdown">Easier</button><button data-act="gup">Harder</button></div>` : '';
     let focus = '';
     if (wk && b) {
       const bStart = S.blocks.slice(0, S.idx).reduce((a, x) => a + x.dur, 0), next = S.blocks[S.idx + 1];
@@ -364,9 +369,9 @@ const V = {
     }
     return `
       <div class="card"><div class="row"><h2 style="margin:0;flex:1">${esc(S.w.name)}</h2><b>${labels[S.state]}</b></div>
-        <p class="mute" style="margin:4px 0 0">Space pause/resume · ↑/↓ ${wk ? 'intensity' : 'adjust'}</p></div>
+        <p class="mute" style="margin:4px 0 0">Space pause/resume · ↑/↓ ${wk ? 'intensity' : 'adjust'}${S.mode === 'grade' ? ' · ←/→ shift' : ''}</p></div>
       ${focus}${gauges}
-      <div class="card row">${controls}<button data-act="down">−</button><button data-act="up">+</button></div>
+      <div class="card row">${controls}<button data-act="down">−</button><button data-act="up">+</button></div>${gears}
       <div class="tiles" style="margin-bottom:12px">${tile('Heart rate', live.hr, 'bpm')}${tile('Elapsed', fmt(S.total))}${wk ? tile('Remaining', fmt(remaining)) : ''}</div>
       <div class="card">${wk ? workoutSvg(S.w, { h: 90, cursor: S.total, power: S.trace }) : lineSvg([{ v: S.rec.t, c: 'var(--acc)' }, { v: S.rec.p, c: 'var(--fg)' }, { v: S.rec.h, c: 'var(--z6)' }])}</div>
       <div class="row">
@@ -440,6 +445,8 @@ document.addEventListener('click', async (e) => {
     case 'free': startFreeRide(); return;
     case 'up': adjust(1); return;
     case 'down': adjust(-1); return;
+    case 'gup': shift(1); return;
+    case 'gdown': shift(-1); return;
     case 'sim': dev.sim = !dev.sim; dev.simPedal = true; if (!dev.sim) live.power = live.cad = live.hr = null; break;
     case 'simpedal': dev.simPedal = !dev.simPedal; break;
     case 'pause': case 'resume': case 'skip': case 'stop': sessionEvent(d.act); return;
@@ -467,6 +474,7 @@ addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer?.files.
 addEventListener('keydown', (e) => {
   if (!S || e.target.closest?.('input')) return;
   if (e.code === 'ArrowUp' || e.code === 'ArrowDown') { e.preventDefault(); adjust(e.code === 'ArrowUp' ? 1 : -1) }
+  else if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') { e.preventDefault(); shift(e.code === 'ArrowRight' ? 1 : -1) }
   else if (e.code === 'Space') { e.preventDefault(); sessionEvent(S.state === 'paused' ? 'resume' : 'pause') }
 });
 addEventListener('beforeunload', (e) => { if (S && S.state !== 'waiting') e.preventDefault() });
