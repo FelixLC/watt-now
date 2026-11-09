@@ -29,6 +29,12 @@ label{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
 input{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);max-width:200px}
 .bar{height:10px;border-radius:5px;background:var(--line);overflow:hidden}.bar i{display:block;height:100%}
 table{width:100%;border-collapse:collapse}td{padding:4px 6px;border-bottom:1px solid var(--line)}
+.focus{display:grid;grid-template-columns:minmax(220px,1fr) 2fr;gap:12px}.focus .card{margin-bottom:12px}
+@media (max-width:640px){.focus{grid-template-columns:1fr}}
+.big{font-size:64px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
+.track{position:relative;height:14px;border-radius:7px;background:var(--line);margin-top:8px;overflow:hidden}
+.track i{position:absolute;top:0;bottom:0}.track b{position:absolute;top:0;bottom:0;width:6px;margin-left:-3px;border-radius:3px}
+.track::after{content:'';position:absolute;left:50%;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--fg);opacity:.6}
 .banner{background:var(--warn);color:#fff;padding:10px 14px;border-radius:10px;margin-bottom:12px}
 </style>
 </head>
@@ -82,38 +88,43 @@ function parseZwo(text, fileName) {
   const blocks = [];
   for (const b of w.children) {
     const t = b.tagName.toLowerCase(), label = b.getAttribute('name');
-    if (t === 'steadystate' || t === 'solidstate') { const lo = req(b, 'Power', 'PowerLow'); blocks.push({ dur: dur(b), p0: lo, p1: attr(b, 'Power', 'PowerHigh') ?? lo, label }) }
-    else if (t === 'warmup' || t === 'cooldown' || t === 'ramp') blocks.push({ dur: dur(b), p0: req(b, 'PowerLow', 'Power'), p1: req(b, 'PowerHigh', 'Power'), label: label ?? (t === 'ramp' ? null : t[0].toUpperCase() + t.slice(1)) });
+    if (t === 'steadystate' || t === 'solidstate') { const lo = req(b, 'Power', 'PowerLow'); blocks.push({ dur: dur(b), p0: lo, p1: attr(b, 'Power', 'PowerHigh') ?? lo, cad: attr(b, 'Cadence'), label }) }
+    else if (t === 'warmup' || t === 'cooldown' || t === 'ramp') blocks.push({ dur: dur(b), p0: req(b, 'PowerLow', 'Power'), p1: req(b, 'PowerHigh', 'Power'), cad: attr(b, 'Cadence'), label: label ?? (t === 'ramp' ? null : t[0].toUpperCase() + t.slice(1)) });
     else if (t === 'intervalst') {
       const r = Math.round(attr(b, 'Repeat') ?? 1), on = dur(b, 'OnDuration'), off = dur(b, 'OffDuration');
       const pon = req(b, 'OnPower', 'PowerOnHigh', 'PowerOnLow'), poff = req(b, 'OffPower', 'PowerOffLow', 'PowerOffHigh');
-      for (let i = 0; i < r; i++) { blocks.push({ dur: on, p0: pon, p1: pon, label: `On ${i + 1}/${r}` }); blocks.push({ dur: off, p0: poff, p1: poff, label: 'Off' }) }
+      for (let i = 0; i < r; i++) { blocks.push({ dur: on, p0: pon, p1: pon, cad: attr(b, 'Cadence'), label: `On ${i + 1}/${r}` }); blocks.push({ dur: off, p0: poff, p1: poff, cad: attr(b, 'CadenceResting'), label: 'Off' }) }
     }
     // ponytail: free ride / max effort have no ERG target; held at 50% FTP so the workout keeps its real length
     else if ((t === 'freeride' || t === 'maxeffort') && attr(b, 'Duration')) blocks.push({ dur: dur(b), p0: 0.5, p1: 0.5, label: t === 'freeride' ? 'Free ride' : 'Max effort' });
   }
   if (!blocks.length) throw new Error('no blocks');
-  return { name: kid('name')?.textContent || fileName.replace(/\.zwo$/i, ''), description: kid('description')?.textContent || '', author: kid('author')?.textContent || '', blocks, file: fileName };
+  return { name: kid('name')?.textContent || fileName.replace(/\.zwo$/i, ''), description: kid('description')?.textContent || '', author: kid('author')?.textContent || '', blocks, file: fileName, xml: text };
 }
 const blockLabel = (b) => { if (b.label) return b.label; const a = zoneOf(b.p0), z = zoneOf(b.p1); return a !== z ? `Ramp ${ZN[a - 1]}→${ZN[z - 1]}` : `Steady ${ZN[a - 1]}` };
 const wDur = (w) => w.blocks.reduce((a, b) => a + b.dur, 0);
 const wTss = (w) => { const p = []; for (const b of w.blocks) for (let t = 0; t < b.dur; t++) p.push((b.p0 + (b.p1 - b.p0) * t / b.dur) * cfg.ftp); return derive(p, cfg.ftp).tss };
 
 const SAMPLE = `<workout_file><name>Sweet Spot 3x8</name><author>OpenCycling Web</author><description>Bundled sample: three 8-minute sweet spot efforts.</description><sportType>bike</sportType><workout><Warmup Duration="600" PowerLow="0.45" PowerHigh="0.75"/><IntervalsT Repeat="3" OnDuration="480" OffDuration="240" OnPower="0.9" OffPower="0.55"/><Cooldown Duration="300" PowerLow="0.65" PowerHigh="0.4"/></workout></workout_file>`;
-let workouts = load('oc.workouts', null) ?? [parseZwo(SAMPLE, 'sample.zwo')];
+let workouts = (load('oc.workouts', null) ?? [parseZwo(SAMPLE, 'sample.zwo')]).map((w) => { try { return w.xml ? parseZwo(w.xml, w.file) : w } catch { return w } });
 
 // ---------- charts ----------
 function workoutSvg(w, opts = {}) {
   const H = opts.h ?? 120, total = wDur(w), max = Math.max(1.3, ...w.blocks.map((b) => Math.max(b.p0, b.p1))) * 1.05;
-  const X = (s) => (s / total) * 1000, Y = (pct) => H - (pct / max) * H;
+  const x0 = opts.from ?? 0, x1 = opts.to ?? total;
+  const X = (s) => ((s - x0) / (x1 - x0)) * 1000, Y = (pct) => H - (pct / max) * H;
   let x = 0, out = '';
   for (const b of w.blocks) {
     const z = zoneOf((b.p0 + b.p1) / 2);
     out += `<polygon points="${X(x)},${H} ${X(x)},${Y(b.p0)} ${X(x + b.dur)},${Y(b.p1)} ${X(x + b.dur)},${H}" fill="var(--z${z})" opacity=".8"/>`;
     x += b.dur;
   }
-  if (opts.power?.length) out += `<polyline fill="none" stroke="var(--fg)" stroke-width="1.5" points="${opts.power.map((p, i) => `${X(i)},${Y(p / cfg.ftp)}`).join(' ')}"/>`;
-  if (opts.cursor != null) out += `<line x1="${X(opts.cursor)}" x2="${X(opts.cursor)}" y1="0" y2="${H}" stroke="var(--fg)" stroke-width="2"/>`;
+  if (opts.power) {  // a skipped block leaves a gap in the trace: start a new segment there
+    const segs = []; let prev = -2;
+    opts.power.forEach((p, i) => { if (i < x0 - 1 || i > x1 + 1) return; if (i !== prev + 1) segs.push([]); segs.at(-1).push(`${X(i)},${Y(p / cfg.ftp)}`); prev = i });
+    out += segs.map((g) => `<polyline fill="none" stroke="var(--fg)" stroke-width="2" vector-effect="non-scaling-stroke" points="${g.join(' ')}"/>`).join('');
+  }
+  if (opts.cursor != null) out += `<line x1="${X(opts.cursor)}" x2="${X(opts.cursor)}" y1="0" y2="${H}" stroke="var(--fg)" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
   return `<svg viewBox="0 0 1000 ${H}" preserveAspectRatio="none" style="height:${H}px">${out}</svg>`;
 }
 function lineSvg(series, H = 160) {
@@ -197,14 +208,14 @@ setInterval(() => {
 setInterval(() => { const n = Date.now(); if (n - live.seen.t > 5000) live.power = live.cad = null; if (n - live.seen.h > 5000 && n - live.seen.t > 5000) live.hr = null }, 1000);
 
 // ---------- session engine (port of session/state.rs) ----------
-const RAMP_S = 15, RESUME_PEDAL_S = 3;
+const RAMP_S = 5, RESUME_PEDAL_S = 2;  // desktop app: 15 s / 3 s, shortened on rider feedback
 const rampFloor = (t) => Math.min(Math.max(Math.floor(t / 2), 30), t);
 let S = null;
 // mode: 'workout' follows the .zwo in ERG; free ride is 'erg' (watts), 'grade' (%) or 'res' (0-100), set by S.manual.
 const FREE = { erg: { step: 10, min: 0, max: 1500, unit: 'W', start: () => Math.round(cfg.ftp * 0.6) }, grade: { step: 0.5, min: -10, max: 20, unit: '%', start: () => 0 }, res: { step: 5, min: 0, max: 100, unit: '', start: () => 20 } };
 function startSession(w, mode = 'workout') {
-  const blocks = w.blocks.map((b) => ({ dur: b.dur, w0: Math.round(b.p0 * cfg.ftp), w1: Math.round(b.p1 * cfg.ftp), label: blockLabel(b) }));
-  S = { w, mode, manual: FREE[mode]?.start(), bias: 100, blocks, idx: 0, bEl: 0, total: 0, state: 'waiting', noPedal: 0, resumePedal: 0, byStall: false, byDropout: false, rampEl: 0, target: null, start: null, rec: { p: [], h: [], c: [], t: [] }, timer: setInterval(tick, 1000) };
+  const blocks = w.blocks.map((b) => ({ dur: b.dur, w0: Math.round(b.p0 * cfg.ftp), w1: Math.round(b.p1 * cfg.ftp), cad: b.cad ?? null, label: blockLabel(b) }));
+  S = { w, mode, manual: FREE[mode]?.start(), bias: 100, blocks, idx: 0, bEl: 0, total: 0, state: 'waiting', noPedal: 0, resumePedal: 0, byStall: false, byDropout: false, rampEl: 0, target: null, start: null, trace: [], rec: { p: [], h: [], c: [], t: [] }, timer: setInterval(tick, 1000) };
   S.target = computeTarget(); sendTarget(S.target); lockScreen(); view = 'session'; render();
 }
 // ponytail: free ride is a 4 h single-block "workout", so stall/pause/record logic is shared unchanged
@@ -240,7 +251,7 @@ function tick() {
     S.noPedal = ped ? 0 : S.noPedal + 1;
     if (S.noPedal >= cfg.stall) { pauseBy('stall') }
     else {
-      S.total++; S.bEl++;
+      S.trace[S.total] = live.power ?? 0; S.total++; S.bEl++;
       const b = curBlock(), left = b.dur - S.bEl;
       if (left > 0 && left <= 3) beep(660, 0.1);
       if (S.bEl >= b.dur) { S.idx++; S.bEl = 0; beep(990, 0.35) }
@@ -334,15 +345,30 @@ const V = {
     const b = curBlock(), labels = { waiting: 'Start pedalling to begin', running: 'Running', paused: S.byStall ? 'Paused: pedal to resume' : S.byDropout ? 'Paused: trainer disconnected' : 'Paused', ramping: `Ramping back up (${RAMP_S - S.rampEl}s)` };
     const remaining = S.blocks.reduce((a, x) => a + x.dur, 0) - S.total, wk = S.mode === 'workout', f = FREE[S.mode];
     const tgt = S.target == null ? null : S.state === 'paused' ? rampFloor(computeTarget()) : S.target;
+    const cadTgt = wk ? b?.cad ?? null : null, idle = S.state !== 'running' && S.state !== 'ramping';
+    const gauges = `<div class="tiles" style="margin-bottom:12px">${gauge('Power', live.power, tgt, 'W', tgt == null ? 0 : Math.max(5, tgt * 0.05), tgt == null ? 0 : Math.max(10, tgt * 0.1), idle)}${gauge('Cadence', live.cad == null ? null : Math.round(live.cad), cadTgt, 'rpm', 5, 10, idle)}</div>`;
+    const controls = wk ? `<span style="flex:1">Intensity <b>${S.bias}%</b></span>` : `${Object.keys(FREE).map((m) => `<button class="${S.mode === m ? 'primary' : ''}" data-mode="${m}">${{ erg: 'ERG', grade: 'Grade', res: 'Resistance' }[m]}</button>`).join('')}<span style="flex:1;text-align:center;font-size:24px;font-weight:700">${S.manual}${f.unit}</span>`;
+    let focus = '';
+    if (wk && b) {
+      const bStart = S.blocks.slice(0, S.idx).reduce((a, x) => a + x.dur, 0), next = S.blocks[S.idx + 1];
+      const blockTgt = (x, t) => Math.round((x.w0 + (x.w1 - x.w0) * t) * S.bias / 100);
+      const watts = (x) => x.w0 === x.w1 ? blockTgt(x, 0) + ' W' : `${blockTgt(x, 0)}→${blockTgt(x, 1)} W`;
+      focus = `<div class="focus">
+        <div class="card"><div class="mute">Block ${S.idx + 1}/${S.blocks.length} · ${esc(b.label)}</div>
+          <div class="big">${fmt(b.dur - S.bEl)}</div>
+          <div class="bar" style="height:8px;margin:4px 0 10px"><i style="width:${S.bEl / b.dur * 100}%;background:var(--acc)"></i></div>
+          <div style="font-size:20px;font-weight:600">${watts(b)}${b.cad ? ` · ${b.cad} rpm` : ''}</div>
+          <div class="mute" style="margin-top:8px">${next ? `Next: ${esc(next.label)} · ${fmt(next.dur)} · ${watts(next)}${next.cad ? ` · ${next.cad} rpm` : ''}` : 'Last block'}</div></div>
+        <div class="card">${workoutSvg(S.w, { h: 180, from: bStart, to: bStart + b.dur + (next ? Math.min(next.dur, 120) : 0), cursor: S.total, power: S.trace })}</div>
+      </div>`;
+    }
     return `
       <div class="card"><div class="row"><h2 style="margin:0;flex:1">${esc(S.w.name)}</h2><b>${labels[S.state]}</b></div>
-        <p class="mute" style="margin:4px 0 0">${wk ? `Block ${S.idx + 1}/${S.blocks.length}: ${esc(b?.label)} · ${fmt((b?.dur ?? 0) - S.bEl)} left in block` : 'Free ride'} · Space pause/resume, ↑/↓ ${wk ? 'intensity' : 'adjust'}</p></div>
-      <div class="card row">
-        ${wk ? `<span style="flex:1">Intensity <b>${S.bias}%</b></span>` : `${Object.keys(FREE).map((m) => `<button class="${S.mode === m ? 'primary' : ''}" data-mode="${m}">${{ erg: 'ERG', grade: 'Grade', res: 'Resistance' }[m]}</button>`).join('')}<span style="flex:1;text-align:center;font-size:24px;font-weight:700">${S.manual}${f.unit}</span>`}
-        <button data-act="down">−</button><button data-act="up">+</button>
-      </div>
-      <div class="tiles" style="margin-bottom:12px">${tile('Target', tgt, 'W')}${tile('Power', live.power, 'W')}${tile('Heart rate', live.hr, 'bpm')}${tile('Cadence', live.cad == null ? null : Math.round(live.cad), 'rpm')}${tile('Elapsed', fmt(S.total))}${wk ? tile('Remaining', fmt(remaining)) : ''}</div>
-      <div class="card">${wk ? workoutSvg(S.w, { h: 160, cursor: S.total, power: S.rec.p.map((x) => x ?? 0) }) : lineSvg([{ v: S.rec.t, c: 'var(--acc)' }, { v: S.rec.p, c: 'var(--fg)' }, { v: S.rec.h, c: 'var(--z6)' }])}</div>
+        <p class="mute" style="margin:4px 0 0">Space pause/resume · ↑/↓ ${wk ? 'intensity' : 'adjust'}</p></div>
+      ${focus}${gauges}
+      <div class="card row">${controls}<button data-act="down">−</button><button data-act="up">+</button></div>
+      <div class="tiles" style="margin-bottom:12px">${tile('Heart rate', live.hr, 'bpm')}${tile('Elapsed', fmt(S.total))}${wk ? tile('Remaining', fmt(remaining)) : ''}</div>
+      <div class="card">${wk ? workoutSvg(S.w, { h: 90, cursor: S.total, power: S.trace }) : lineSvg([{ v: S.rec.t, c: 'var(--acc)' }, { v: S.rec.p, c: 'var(--fg)' }, { v: S.rec.h, c: 'var(--z6)' }])}</div>
       <div class="row">
         ${S.state === 'paused' ? `<button class="primary" data-act="resume">Resume</button>` : `<button data-act="pause" ${S.state === 'waiting' ? 'disabled' : ''}>Pause</button>`}
         ${wk ? `<button data-act="skip" ${S.state === 'waiting' ? 'disabled' : ''}>Skip block</button>` : ''}
@@ -362,6 +388,18 @@ const V = {
     <label>Auto-pause after not pedalling for (s)<input type="number" min="2" max="60" value="${cfg.stall}" data-cfg="stall"></label>
     <p class="mute">Everything is stored in this browser's localStorage. Clearing site data deletes your history.</p></div>`,
 };
+// Actual vs target on a bar centred on the target: green within ok, amber within warn, red beyond.
+function gauge(name, actual, target, unit, ok, warn, idle = false) {
+  if (target == null) return tile(name, actual, unit);
+  const d = actual == null ? null : actual - target, a = Math.abs(d ?? 0), range = warn * 2.5;
+  const col = d == null || idle ? 'var(--line)' : a <= ok ? 'var(--ok)' : a <= warn ? 'var(--warn)' : 'var(--z6)';
+  const pos = d == null ? 50 : 50 + Math.max(-1, Math.min(1, d / range)) * 50, band = (w) => `left:${50 - w / range * 50}%;width:${w / range * 100}%`;
+  const msg = idle ? '' : d == null ? 'no data' : a <= ok ? 'on target' : `${d > 0 ? '+' : '−'}${Math.round(a)} ${unit} ${d > 0 ? 'too high' : 'too low'}`;
+  return `<div class="tile gauge" style="border-color:${col};box-shadow:inset 0 0 0 2px ${col}">
+    <div class="row"><small style="flex:1">${name}</small><b style="color:${col}">${msg}</b></div>
+    <span>${actual ?? '—'}</span> <em class="mute" style="font-style:normal">/ ${Math.round(target)} ${unit}</em>
+    <div class="track"><i style="${band(warn)};background:var(--warn);opacity:.35"></i><i style="${band(ok)};background:var(--ok);opacity:.5"></i><b style="left:${pos}%;background:${col}"></b></div></div>`;
+}
 function workoutCard(w) {
   const i = workouts.indexOf(w);
   return `<div class="card"><div class="row"><b style="flex:1">${esc(w.name)}</b><span class="mute">${fmt(wDur(w))} · TSS ${Math.round(wTss(w))}</span></div>
