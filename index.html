@@ -322,11 +322,12 @@ const V = {
       <p class="mute" style="margin-bottom:0">A connected power meter replaces the trainer's power reading.</p>
       <div class="tiles" style="margin-top:12px">${tile('Power', live.power, 'W')}${tile('Cadence', live.cad == null ? null : Math.round(live.cad), 'rpm')}${tile('Heart rate', live.hr, 'bpm')}</div>
     </div>
-    <div class="card"><h3 style="margin-top:0">Start a workout</h3><p class="mute">FTP ${cfg.ftp} W. Pick one below or load .zwo files in Workouts.</p>
+    <div class="card"><h3 style="margin-top:0">Start a workout</h3><p class="mute">FTP ${cfg.ftp} W. Pick one below, or drop .zwo files anywhere on the page.</p>
+      <label class="row" style="flex-direction:row">Load .zwo files <input type="file" accept=".zwo,.xml" multiple data-act="zwo"></label>
       <div class="grid">${workouts.slice(0, 6).map(workoutCard).join('')}</div></div>`,
   workouts: () => openWorkout != null ? workoutDetail(workouts[openWorkout]) : `
     <div class="card row"><label style="margin:0">Load .zwo files<input type="file" accept=".zwo,.xml" multiple data-act="zwo"></label>
-      <span class="mute">${workouts.length} workouts, stored in this browser.</span></div>
+      <span class="mute">${workouts.length} workouts, stored in this browser. You can also drop files anywhere on the page.</span></div>
     <div class="grid">${workouts.map(workoutCard).join('')}</div>`,
   session: () => {
     if (!S) return `<p>No session running.</p>`;
@@ -412,13 +413,19 @@ document.addEventListener('click', async (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.dataset.cfg) { cfg[t.dataset.cfg] = Math.max(+t.min, Math.min(+t.max, +t.value || 0)); save('oc.cfg', cfg) }
-  if (t.dataset.act === 'zwo') {
-    const errs = [];
-    for (const f of t.files) { try { const w = parseZwo(await f.text(), f.name); workouts = workouts.filter((x) => x.file !== w.file); workouts.push(w) } catch (err) { errs.push(`${f.name}: ${err.message}`) } }
-    save('oc.workouts', workouts); if (errs.length) alert('Skipped:\n' + errs.join('\n'));
-  }
+  if (t.dataset.act === 'zwo') return importZwo(t.files);
   render();
 });
+async function importZwo(files) {
+  const errs = [], added = [];
+  for (const f of files) { try { const w = parseZwo(await f.text(), f.name); workouts = workouts.filter((x) => x.file !== w.file); workouts.push(w); added.push(w.name) } catch (err) { errs.push(`${f.name}: ${err.message}`) } }
+  save('oc.workouts', workouts);
+  alert([added.length ? `Loaded ${added.length} workout(s):\n${added.join('\n')}` : '', errs.length ? 'Skipped:\n' + errs.join('\n') : ''].filter(Boolean).join('\n\n') || 'No files selected.');
+  if (!S) { view = 'workouts'; openWorkout = null } render();
+}
+// Drop .zwo files anywhere on the page, a fallback for when the file picker is unavailable.
+addEventListener('dragover', (e) => e.preventDefault());
+addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer?.files.length) importZwo(e.dataTransfer.files) });
 addEventListener('keydown', (e) => {
   if (!S || e.target.closest?.('input')) return;
   if (e.code === 'ArrowUp' || e.code === 'ArrowDown') { e.preventDefault(); adjust(e.code === 'ArrowUp' ? 1 : -1) }
