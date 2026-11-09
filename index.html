@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenCycling Web</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#14161a;--mute:#6b7280;--line:#e3e6ea;--acc:#ff5a1f;--ok:#16a34a;--warn:#d97706;
+--z1:#9ca3af;--z2:#3b82f6;--z3:#22c55e;--z4:#eab308;--z5:#f97316;--z6:#ef4444}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b21;--fg:#e8eaee;--mute:#9aa1ac;--line:#2a2e36}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;gap:4px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0;z-index:2;flex-wrap:wrap}
+header b{margin-right:12px;color:var(--acc)}
+nav button,button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:6px 12px;cursor:pointer}
+nav button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+main{max-width:1000px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.tile small{color:var(--mute);display:block}.tile span{font-size:32px;font-weight:700;font-variant-numeric:tabular-nums}
+.mute{color:var(--mute)}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--z1);margin-right:6px}.dot.ok{background:var(--ok)}
+svg{display:block;width:100%}
+label{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+input{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);max-width:200px}
+.bar{height:10px;border-radius:5px;background:var(--line);overflow:hidden}.bar i{display:block;height:100%}
+table{width:100%;border-collapse:collapse}td{padding:4px 6px;border-bottom:1px solid var(--line)}
+.banner{background:var(--warn);color:#fff;padding:10px 14px;border-radius:10px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<header><b>OpenCycling</b><nav class="row" id="nav"></nav><span style="flex:1"></span><span id="dev" class="mute"></span></header>
+<main id="app"></main>
+<script>
+// ponytail: single-file port of the core loop (devices, .zwo, ERG session, history, TCX).
+// Skipped from the desktop app: training plans, FTP ramp test, aero webcam, Strava, BLE auto-reconnect.
+// Borrowed from Auuki: power meter (CPS) as power source, free ride in ERG / grade / resistance,
+// intensity bias, keyboard controls, screen wake lock. Skipped from Auuki: FIT, ANT+, intervals.icu, PWA.
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d } catch { return d } };
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true } catch { alert('Browser storage is full or blocked: export old sessions as TCX and delete them.'); return false } };
+const fmt = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0') };
+
+// ---------- settings ----------
+let cfg = load('oc.cfg', { ftp: 200, maxHr: 185, stall: 5 });
+
+// ---------- metrics (port of metrics.rs) ----------
+const ZT = [0.55, 0.75, 0.9, 1.05, 1.2];
+const ZN = ['Recovery', 'Endurance', 'Tempo', 'Threshold', 'VO2max', 'Anaerobic'];
+const zoneOf = (pct) => { for (let i = 0; i < ZT.length; i++) if (pct < ZT[i]) return i + 1; return 6 };
+// ponytail: HR zones as fixed %maxHR bands (5 zones), the desktop app's exact HR bands were not ported
+const HRT = [0.6, 0.7, 0.8, 0.9];
+const hrZoneOf = (pct) => { for (let i = 0; i < HRT.length; i++) if (pct < HRT[i]) return i + 1; return 5 };
+function np(p) {
+  if (!p.length) return 0;
+  const W = 30; if (p.length < W) return p.reduce((a, b) => a + b, 0) / p.length;
+  let ws = p.slice(0, W).reduce((a, b) => a + b, 0), s4 = (ws / W) ** 4, n = 1;
+  for (let i = W; i < p.length; i++) { ws += p[i] - p[i - W]; s4 += (ws / W) ** 4; n++ }
+  return (s4 / n) ** 0.25;
+}
+function derive(p, ftp) { const n = np(p), IF = n / ftp; return { np: n, if: IF, tss: (p.length / 3600) * IF * IF * 100 } }
+
+// ---------- .zwo parsing (port of zwo.rs) ----------
+function parseZwo(text, fileName) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new Error('invalid XML');
+  const root = doc.documentElement, kid = (t) => [...root.children].find((n) => n.tagName === t);
+  const sport = kid('sportType')?.textContent;
+  if (sport !== 'bike') throw new Error(sport ? 'not a bike workout' : 'no sport specified');
+  const w = kid('workout'); if (!w) throw new Error('missing workout block');
+  const num = (n, a, req = true) => { const v = n.getAttribute(a); if (v == null) { if (req) throw new Error('missing ' + a); return null } const x = Number(v); if (!isFinite(x)) throw new Error('invalid ' + a); return x };
+  const blocks = [];
+  for (const b of w.children) {
+    const t = b.tagName, label = b.getAttribute('name');
+    if (t === 'SteadyState') blocks.push({ dur: num(b, 'Duration'), p0: num(b, 'Power'), p1: num(b, 'Power'), label });
+    else if (t === 'Warmup' || t === 'Cooldown' || t === 'Ramp') blocks.push({ dur: num(b, 'Duration'), p0: num(b, 'PowerLow'), p1: num(b, 'PowerHigh'), label: label ?? (t === 'Ramp' ? null : t) });
+    else if (t === 'IntervalsT') {
+      const r = num(b, 'Repeat'), on = num(b, 'OnDuration'), off = num(b, 'OffDuration'), pon = num(b, 'OnPower'), poff = num(b, 'OffPower');
+      for (let i = 0; i < r; i++) { blocks.push({ dur: on, p0: pon, p1: pon, label: `On ${i + 1}/${r}` }); blocks.push({ dur: off, p0: poff, p1: poff, label: 'Off' }) }
+    }
+  }
+  if (!blocks.length) throw new Error('no blocks');
+  return { name: kid('name')?.textContent || fileName.replace(/\.zwo$/i, ''), description: kid('description')?.textContent || '', author: kid('author')?.textContent || '', blocks, file: fileName };
+}
+const blockLabel = (b) => { if (b.label) return b.label; const a = zoneOf(b.p0), z = zoneOf(b.p1); return a !== z ? `Ramp ${ZN[a - 1]}→${ZN[z - 1]}` : `Steady ${ZN[a - 1]}` };
+const wDur = (w) => w.blocks.reduce((a, b) => a + b.dur, 0);
+const wTss = (w) => { const p = []; for (const b of w.blocks) for (let t = 0; t < b.dur; t++) p.push((b.p0 + (b.p1 - b.p0) * t / b.dur) * cfg.ftp); return derive(p, cfg.ftp).tss };
+
+const SAMPLE = `<workout_file><name>Sweet Spot 3x8</name><author>OpenCycling Web</author><description>Bundled sample: three 8-minute sweet spot efforts.</description><sportType>bike</sportType><workout><Warmup Duration="600" PowerLow="0.45" PowerHigh="0.75"/><IntervalsT Repeat="3" OnDuration="480" OffDuration="240" OnPower="0.9" OffPower="0.55"/><Cooldown Duration="300" PowerLow="0.65" PowerHigh="0.4"/></workout></workout_file>`;
+let workouts = load('oc.workouts', null) ?? [parseZwo(SAMPLE, 'sample.zwo')];
+
+// ---------- charts ----------
+function workoutSvg(w, opts = {}) {
+  const H = opts.h ?? 120, total = wDur(w), max = Math.max(1.3, ...w.blocks.map((b) => Math.max(b.p0, b.p1))) * 1.05;
+  const X = (s) => (s / total) * 1000, Y = (pct) => H - (pct / max) * H;
+  let x = 0, out = '';
+  for (const b of w.blocks) {
+    const z = zoneOf((b.p0 + b.p1) / 2);
+    out += `<polygon points="${X(x)},${H} ${X(x)},${Y(b.p0)} ${X(x + b.dur)},${Y(b.p1)} ${X(x + b.dur)},${H}" fill="var(--z${z})" opacity=".8"/>`;
+    x += b.dur;
+  }
+  if (opts.power?.length) out += `<polyline fill="none" stroke="var(--fg)" stroke-width="1.5" points="${opts.power.map((p, i) => `${X(i)},${Y(p / cfg.ftp)}`).join(' ')}"/>`;
+  if (opts.cursor != null) out += `<line x1="${X(opts.cursor)}" x2="${X(opts.cursor)}" y1="0" y2="${H}" stroke="var(--fg)" stroke-width="2"/>`;
+  return `<svg viewBox="0 0 1000 ${H}" preserveAspectRatio="none" style="height:${H}px">${out}</svg>`;
+}
+function lineSvg(series, H = 160) {
+  const max = Math.max(1, ...series.flatMap((s) => s.v.filter((x) => x != null))), n = Math.max(...series.map((s) => s.v.length));
+  const X = (i) => (i / Math.max(1, n - 1)) * 1000, Y = (v) => H - (v / max) * H;
+  return `<svg viewBox="0 0 1000 ${H}" preserveAspectRatio="none" style="height:${H}px">${series.map((s) =>
+    `<polyline fill="none" stroke="${s.c}" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${s.v.map((v, i) => v == null ? '' : `${X(i)},${Y(v)}`).join(' ')}"/>`).join('')}</svg>`;
+}
+function zoneBars(values, zoneFn, names, prefix) {
+  const counts = names.map(() => 0); let n = 0;
+  for (const v of values) if (v != null) { counts[zoneFn(v) - 1]++; n++ }
+  return `<table>${names.map((nm, i) => `<tr><td style="width:110px">Z${i + 1} ${nm}</td><td><div class="bar"><i style="width:${n ? counts[i] / n * 100 : 0}%;background:var(--${prefix}${i + 1})"></i></div></td><td style="width:60px;text-align:right">${fmt(counts[i])}</td></tr>`).join('')}</table>`;
+}
+
+// ---------- BLE (port of ble/ftms, ble/hrs) ----------
+const live = { power: null, cad: null, hr: null, seen: { t: 0, h: 0 } };
+const dev = { trainer: null, hrm: null, pm: null, cp: null, sim: false, simPedal: true, lastErg: null, lastErgAt: 0, lastCtl: '', lastCtlAt: 0 };
+function parseIndoorBike(dv) {
+  const f = dv.getUint16(0, true); let o = 2; const r = {};
+  if (!(f & 1)) o += 2;          // instantaneous speed
+  if (f & 2) o += 2;             // avg speed
+  if (f & 4) { r.cad = dv.getUint16(o, true) / 2; o += 2 }
+  if (f & 8) o += 2;             // avg cadence
+  if (f & 16) o += 3;            // total distance
+  if (f & 32) o += 2;            // resistance
+  if (f & 64) { r.power = dv.getInt16(o, true); o += 2 }
+  if (f & 128) o += 2;           // avg power
+  if (f & 256) o += 5;           // energy
+  if (f & 512) { r.hr = dv.getUint8(o); o += 1 }
+  return r;
+}
+const parseHr = (dv) => (dv.getUint8(0) & 1 ? dv.getUint16(1, true) : dv.getUint8(1));
+let gattQueue = Promise.resolve();
+const gatt = (fn) => (gattQueue = gattQueue.then(fn, fn));  // Web Bluetooth rejects concurrent GATT ops
+async function connectTrainer() {
+  const d = await navigator.bluetooth.requestDevice({ filters: [{ services: ['fitness_machine'] }] });
+  const s = await (await d.gatt.connect()).getPrimaryService('fitness_machine');
+  const data = await s.getCharacteristic('indoor_bike_data');
+  data.addEventListener('characteristicvaluechanged', (e) => { const r = parseIndoorBike(e.target.value); if (r.power != null && !dev.pm) live.power = r.power; if (r.cad != null) live.cad = r.cad; if (r.hr && !dev.hrm) live.hr = r.hr; live.seen.t = Date.now() });
+  await data.startNotifications();
+  dev.cp = await s.getCharacteristic('fitness_machine_control_point');
+  await dev.cp.startNotifications();
+  await gatt(() => dev.cp.writeValueWithResponse(new Uint8Array([0x00])));  // request control
+  d.addEventListener('gattserverdisconnected', () => { dev.trainer = null; dev.cp = null; if (S) sessionEvent('lost'); render() });
+  dev.trainer = d; dev.sim = false; render();
+}
+async function connectHrm() {
+  const d = await navigator.bluetooth.requestDevice({ filters: [{ services: ['heart_rate'] }] });
+  const c = await (await (await d.gatt.connect()).getPrimaryService('heart_rate')).getCharacteristic('heart_rate_measurement');
+  c.addEventListener('characteristicvaluechanged', (e) => { live.hr = parseHr(e.target.value); live.seen.h = Date.now() });
+  await c.startNotifications();
+  d.addEventListener('gattserverdisconnected', () => { dev.hrm = null; render() });
+  dev.hrm = d; render();
+}
+// Power meter over the Cycling Power Service: when connected it is the power source (trainer power is often less accurate).
+async function connectPm() {
+  const d = await navigator.bluetooth.requestDevice({ filters: [{ services: ['cycling_power'] }] });
+  const c = await (await (await d.gatt.connect()).getPrimaryService('cycling_power')).getCharacteristic('cycling_power_measurement');
+  c.addEventListener('characteristicvaluechanged', (e) => { live.power = e.target.value.getInt16(2, true); live.seen.t = Date.now() });
+  await c.startNotifications();
+  d.addEventListener('gattserverdisconnected', () => { dev.pm = null; render() });
+  dev.pm = d; render();
+}
+const ctl = (bytes) => { if (dev.cp) gatt(() => dev.cp.writeValueWithResponse(new Uint8Array(bytes))).catch((e) => console.warn('control write failed', e)) };
+const i16 = (v) => [v & 0xff, (v >> 8) & 0xff];
+function setErg(w) { w = Math.round(w); dev.lastErg = w; dev.lastErgAt = Date.now(); ctl([0x05, ...i16(w)]) }
+// FTMS 0x11 simulation params: wind 0, grade (0.01 %), crr 0.004, cw 0.51 kg/m (Auuki defaults); 0x04 resistance (0.1 units)
+const setGrade = (g) => { dev.lastErg = null; ctl([0x11, 0, 0, ...i16(Math.round(g * 100)), 40, 51]) };
+const setRes = (r) => { dev.lastErg = null; ctl([0x04, ...i16(Math.round(r * 10))]) };
+// Simulator: stands in for a trainer + HRM so the app is usable without hardware.
+setInterval(() => {
+  if (!dev.sim) return;
+  const tgt = S?.mode === 'grade' ? 150 + S.manual * 25 : S?.mode === 'res' ? 80 + S.manual * 3 : dev.lastErg ?? 100;
+  live.cad = dev.simPedal ? 88 + Math.round(Math.random() * 6 - 3) : 0;
+  live.power = dev.simPedal ? Math.max(0, Math.round(tgt + (Math.random() * 16 - 8))) : 0;
+  const hrTarget = 70 + (dev.simPedal ? 90 * tgt / cfg.ftp : 0);
+  live.hr = Math.round((live.hr ?? 70) + (hrTarget - (live.hr ?? 70)) * 0.05);
+  live.seen.t = live.seen.h = Date.now();
+}, 1000);
+// Stale readings show as "no data" after 5 s of silence (STALE_AFTER in ble/actor.rs).
+setInterval(() => { const n = Date.now(); if (n - live.seen.t > 5000) live.power = live.cad = null; if (n - live.seen.h > 5000 && n - live.seen.t > 5000) live.hr = null }, 1000);
+
+// ---------- session engine (port of session/state.rs) ----------
+const RAMP_S = 15, RESUME_PEDAL_S = 3;
+const rampFloor = (t) => Math.min(Math.max(Math.floor(t / 2), 30), t);
+let S = null;
+// mode: 'workout' follows the .zwo in ERG; free ride is 'erg' (watts), 'grade' (%) or 'res' (0-100), set by S.manual.
+const FREE = { erg: { step: 10, min: 0, max: 1500, unit: 'W', start: () => Math.round(cfg.ftp * 0.6) }, grade: { step: 0.5, min: -10, max: 20, unit: '%', start: () => 0 }, res: { step: 5, min: 0, max: 100, unit: '', start: () => 20 } };
+function startSession(w, mode = 'workout') {
+  const blocks = w.blocks.map((b) => ({ dur: b.dur, w0: Math.round(b.p0 * cfg.ftp), w1: Math.round(b.p1 * cfg.ftp), label: blockLabel(b) }));
+  S = { w, mode, manual: FREE[mode]?.start(), bias: 100, blocks, idx: 0, bEl: 0, total: 0, state: 'waiting', noPedal: 0, resumePedal: 0, byStall: false, byDropout: false, rampEl: 0, target: null, start: null, rec: { p: [], h: [], c: [], t: [] }, timer: setInterval(tick, 1000) };
+  S.target = computeTarget(); sendTarget(S.target); lockScreen(); view = 'session'; render();
+}
+// ponytail: free ride is a 4 h single-block "workout", so stall/pause/record logic is shared unchanged
+const startFreeRide = () => startSession({ name: 'Free ride', blocks: [{ dur: 4 * 3600, p0: 0.6, p1: 0.6, label: 'Free ride' }] }, 'erg');
+const curBlock = () => S.blocks[S.idx];
+function computeTarget() {
+  if (S.mode === 'erg') return S.manual;
+  if (S.mode !== 'workout') return null;
+  const b = curBlock(); return b ? Math.max(0, Math.round((b.w0 + (b.w1 - b.w0) * S.bEl / b.dur) * S.bias / 100)) : S.target;
+}
+function sendTarget(w) {
+  const key = S.mode === 'grade' || S.mode === 'res' ? S.mode + S.manual : 'erg' + w, stale = Date.now() - dev.lastCtlAt >= 10000;  // 10 s keep-alive
+  if (key === dev.lastCtl && !stale) return;
+  dev.lastCtl = key; dev.lastCtlAt = Date.now();
+  if (S.mode === 'grade') setGrade(S.manual); else if (S.mode === 'res') setRes(S.manual); else if (w != null) setErg(w);
+}
+function adjust(dir) {
+  if (!S || S.state === 'finished') return;
+  if (S.mode === 'workout') S.bias = Math.max(50, Math.min(150, S.bias + dir));
+  else { const f = FREE[S.mode]; S.manual = Math.max(f.min, Math.min(f.max, +(S.manual + dir * f.step).toFixed(1))) }
+  if (S.state === 'running' || S.state === 'waiting') S.target = computeTarget();
+  sendTarget(S.state === 'paused' ? rampFloor(computeTarget() ?? 0) : S.target); render();
+}
+function setMode(m) { S.mode = m; S.manual = FREE[m].start(); S.target = computeTarget(); sendTarget(S.target); render() }
+let wakeLock = null;
+async function lockScreen() { try { if (S && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock?.request('screen') } catch { } }
+document.addEventListener('visibilitychange', lockScreen);  // the browser drops the lock when the tab is hidden
+const pedaling = () => (live.cad ?? 0) >= 30 || (live.power ?? 0) >= 30;
+function tick() {
+  const ped = pedaling(), st = S.state;
+  if (st === 'waiting') { if (ped) { S.state = 'running'; S.noPedal = 0; S.start = Date.now(); beep(880, 0.3) } }
+  else if (st === 'running') {
+    S.noPedal = ped ? 0 : S.noPedal + 1;
+    if (S.noPedal >= cfg.stall) { pauseBy('stall') }
+    else {
+      S.total++; S.bEl++;
+      const b = curBlock(), left = b.dur - S.bEl;
+      if (left > 0 && left <= 3) beep(660, 0.1);
+      if (S.bEl >= b.dur) { S.idx++; S.bEl = 0; beep(990, 0.35) }
+      if (S.idx >= S.blocks.length) return finish();
+      S.target = computeTarget();
+    }
+  } else if (st === 'paused') {
+    if (S.byStall) { if (ped) { if (++S.resumePedal >= RESUME_PEDAL_S) toRamp() } else S.resumePedal = 0 }
+  } else if (st === 'ramping') {
+    if (!ped) { if (++S.noPedal >= cfg.stall) pauseBy('stall') }
+    else {
+      S.noPedal = 0;
+      if (++S.rampEl >= RAMP_S) S.state = 'running';
+      else { const t = computeTarget(); if (t != null) { const f = rampFloor(t); S.target = Math.round(f + (t - f) * S.rampEl / RAMP_S) } }
+    }
+  }
+  if (S.state === 'running' || S.state === 'ramping') { S.rec.p.push(live.power); S.rec.h.push(live.hr); S.rec.c.push(live.cad); S.rec.t.push(S.target) }
+  sendTarget(S.state === 'paused' && S.target != null ? rampFloor(computeTarget()) : S.target);
+  if (view === 'session') render();
+}
+function pauseBy(why) { S.state = 'paused'; S.byStall = why === 'stall'; S.byDropout = why === 'lost'; S.resumePedal = 0 }
+function toRamp() { S.state = 'ramping'; S.rampEl = 0; S.noPedal = 0; const t = computeTarget(); S.target = t == null ? null : rampFloor(t) }
+function sessionEvent(e) {
+  const st = S?.state; if (!st || st === 'finished') return;
+  if (e === 'pause' && (st === 'running' || st === 'ramping')) pauseBy('manual');
+  else if (e === 'resume' && st === 'paused') toRamp();
+  else if (e === 'lost' && (st === 'running' || st === 'ramping')) pauseBy('lost');
+  else if (e === 'skip' && st !== 'waiting' && S.mode === 'workout') {
+    S.total += curBlock().dur - S.bEl; S.idx++; S.bEl = 0;
+    if (S.idx >= S.blocks.length) return finish();
+    if (st === 'ramping') S.state = 'running';
+    S.target = computeTarget();
+  } else if (e === 'stop') return finish();
+  render();
+}
+function finish() {
+  clearInterval(S.timer); S.state = 'finished'; setErg(0); beep(520, 0.6); wakeLock?.release().catch(() => { }); wakeLock = null;
+  if (S.rec.p.length) {
+    const p = S.rec.p.map((x) => x ?? 0), m = derive(p, cfg.ftp);
+    const rec = { id: Date.now(), start: S.start, name: S.w.name, ftp: cfg.ftp, maxHr: cfg.maxHr, dur: S.rec.p.length, ...m, avgP: p.reduce((a, b) => a + b, 0) / p.length, ...S.rec };
+    const all = load('oc.sessions', []); all.unshift(rec);
+    if (save('oc.sessions', all)) { openId = rec.id; view = 'history' }
+  } else view = 'home';
+  S = null; render();
+}
+let actx;
+function beep(freq, len) {
+  try { actx ??= new AudioContext(); const o = actx.createOscillator(), g = actx.createGain(); o.frequency.value = freq; g.gain.value = 0.15; o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + len) } catch { }
+}
+
+// ---------- TCX export (port of export/tcx.rs, minus the workout-structure note) ----------
+function tcx(s) {
+  const iso = (ms) => new Date(ms).toISOString(), kcal = Math.round(s.avgP * s.dur * 3.6 / 1000);  // ~kJ ≈ kcal
+  const pts = s.p.map((p, i) => `<Trackpoint><Time>${iso(s.start + i * 1000)}</Time>${s.h[i] ? `<HeartRateBpm><Value>${s.h[i]}</Value></HeartRateBpm>` : ''}${s.c[i] != null ? `<Cadence>${Math.round(s.c[i])}</Cadence>` : ''}<Extensions><ns3:TPX><ns3:Watts>${p ?? 0}</ns3:Watts></ns3:TPX></Extensions></Trackpoint>`).join('');
+  return `<?xml version="1.0" encoding="UTF-8"?><TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2" xmlns:ns3="http://www.garmin.com/xmlschemas/ActivityExtension/v2"><Activities><Activity Sport="Biking"><Id>${iso(s.start)}</Id><Lap StartTime="${iso(s.start)}"><TotalTimeSeconds>${s.dur}</TotalTimeSeconds><DistanceMeters>0</DistanceMeters><Calories>${kcal}</Calories><Intensity>Active</Intensity><TriggerMethod>Manual</TriggerMethod><Track>${pts}</Track></Lap><Notes>${esc(s.name)}</Notes></Activity></Activities></TrainingCenterDatabase>`;
+}
+function download(name, text) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/xml' })); a.download = name; a.click(); URL.revokeObjectURL(a.href) }
+
+// ---------- views ----------
+let view = 'home', openId = null, openWorkout = null;
+const VIEWS = { home: 'Home', workouts: 'Workouts', session: 'Session', history: 'History', settings: 'Settings' };
+const tile = (k, v, unit = '') => `<div class="tile"><small>${k}</small><span>${v ?? '—'}</span> ${v == null ? '' : unit}</div>`;
+function render() {
+  $('#nav').innerHTML = Object.entries(VIEWS).filter(([k]) => k !== 'session' || S).map(([k, v]) => `<button class="${view === k ? 'on' : ''}" data-go="${k}">${v}</button>`).join('');
+  $('#dev').innerHTML = `<span class="dot ${dev.trainer || dev.sim ? 'ok' : ''}"></span>${dev.sim ? 'Simulator' : dev.trainer ? esc(dev.trainer.name) : 'No trainer'} · <span class="dot ${dev.hrm || dev.sim ? 'ok' : ''}"></span>${dev.hrm ? esc(dev.hrm.name) : dev.sim ? 'Sim HR' : 'No HRM'}`;
+  $('#app').innerHTML = (V[view] ?? V.home)();
+}
+const V = {
+  home: () => `
+    ${'bluetooth' in navigator ? '' : `<div class="banner">Web Bluetooth is not available in this browser. Use Chrome or Edge on desktop or Android, served over https or localhost. The simulator still works.</div>`}
+    <div class="card"><h3 style="margin-top:0">Devices</h3>
+      <div class="row">
+        <button class="primary" data-act="trainer" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.trainer ? 'Trainer: ' + esc(dev.trainer.name) : 'Connect trainer (FTMS)'}</button>
+        <button data-act="hrm" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.hrm ? 'HRM: ' + esc(dev.hrm.name) : 'Connect heart rate'}</button>
+        <button data-act="pm" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.pm ? 'Power meter: ' + esc(dev.pm.name) : 'Connect power meter'}</button>
+        <button data-act="sim">${dev.sim ? 'Stop simulator' : 'Use simulator'}</button>
+        <button data-act="free" ${dev.trainer || dev.sim ? '' : 'disabled'}>Free ride</button>
+      </div>
+      <p class="mute" style="margin-bottom:0">A connected power meter replaces the trainer's power reading.</p>
+      <div class="tiles" style="margin-top:12px">${tile('Power', live.power, 'W')}${tile('Cadence', live.cad == null ? null : Math.round(live.cad), 'rpm')}${tile('Heart rate', live.hr, 'bpm')}</div>
+    </div>
+    <div class="card"><h3 style="margin-top:0">Start a workout</h3><p class="mute">FTP ${cfg.ftp} W. Pick one below or load .zwo files in Workouts.</p>
+      <div class="grid">${workouts.slice(0, 6).map(workoutCard).join('')}</div></div>`,
+  workouts: () => openWorkout != null ? workoutDetail(workouts[openWorkout]) : `
+    <div class="card row"><label style="margin:0">Load .zwo files<input type="file" accept=".zwo,.xml" multiple data-act="zwo"></label>
+      <span class="mute">${workouts.length} workouts, stored in this browser.</span></div>
+    <div class="grid">${workouts.map(workoutCard).join('')}</div>`,
+  session: () => {
+    if (!S) return `<p>No session running.</p>`;
+    const b = curBlock(), labels = { waiting: 'Start pedalling to begin', running: 'Running', paused: S.byStall ? 'Paused: pedal to resume' : S.byDropout ? 'Paused: trainer disconnected' : 'Paused', ramping: `Ramping back up (${RAMP_S - S.rampEl}s)` };
+    const remaining = S.blocks.reduce((a, x) => a + x.dur, 0) - S.total, wk = S.mode === 'workout', f = FREE[S.mode];
+    const tgt = S.target == null ? null : S.state === 'paused' ? rampFloor(computeTarget()) : S.target;
+    return `
+      <div class="card"><div class="row"><h2 style="margin:0;flex:1">${esc(S.w.name)}</h2><b>${labels[S.state]}</b></div>
+        <p class="mute" style="margin:4px 0 0">${wk ? `Block ${S.idx + 1}/${S.blocks.length}: ${esc(b?.label)} · ${fmt((b?.dur ?? 0) - S.bEl)} left in block` : 'Free ride'} · Space pause/resume, ↑/↓ ${wk ? 'intensity' : 'adjust'}</p></div>
+      <div class="card row">
+        ${wk ? `<span style="flex:1">Intensity <b>${S.bias}%</b></span>` : `${Object.keys(FREE).map((m) => `<button class="${S.mode === m ? 'primary' : ''}" data-mode="${m}">${{ erg: 'ERG', grade: 'Grade', res: 'Resistance' }[m]}</button>`).join('')}<span style="flex:1;text-align:center;font-size:24px;font-weight:700">${S.manual}${f.unit}</span>`}
+        <button data-act="down">−</button><button data-act="up">+</button>
+      </div>
+      <div class="tiles" style="margin-bottom:12px">${tile('Target', tgt, 'W')}${tile('Power', live.power, 'W')}${tile('Heart rate', live.hr, 'bpm')}${tile('Cadence', live.cad == null ? null : Math.round(live.cad), 'rpm')}${tile('Elapsed', fmt(S.total))}${wk ? tile('Remaining', fmt(remaining)) : ''}</div>
+      <div class="card">${wk ? workoutSvg(S.w, { h: 160, cursor: S.total, power: S.rec.p.map((x) => x ?? 0) }) : lineSvg([{ v: S.rec.t, c: 'var(--acc)' }, { v: S.rec.p, c: 'var(--fg)' }, { v: S.rec.h, c: 'var(--z6)' }])}</div>
+      <div class="row">
+        ${S.state === 'paused' ? `<button class="primary" data-act="resume">Resume</button>` : `<button data-act="pause" ${S.state === 'waiting' ? 'disabled' : ''}>Pause</button>`}
+        ${wk ? `<button data-act="skip" ${S.state === 'waiting' ? 'disabled' : ''}>Skip block</button>` : ''}
+        <button data-act="stop">Stop and save</button>
+        ${dev.sim ? `<button data-act="simpedal">${dev.simPedal ? 'Sim: stop pedalling' : 'Sim: pedal'}</button>` : ''}
+      </div>`;
+  },
+  history: () => {
+    const all = load('oc.sessions', []), s = all.find((x) => x.id === openId);
+    if (s) return sessionDetail(s);
+    return all.length ? `<div class="grid">${all.map((x) => `<div class="card" data-open="${x.id}" style="cursor:pointer"><b>${esc(x.name)}</b><div class="mute">${new Date(x.start).toLocaleString()}</div><div>${fmt(x.dur)} · ${Math.round(x.avgP)} W avg · TSS ${Math.round(x.tss)}</div></div>`).join('')}</div>`
+      : `<p class="mute">No sessions yet.</p>`;
+  },
+  settings: () => `<div class="card"><h3 style="margin-top:0">Settings</h3>
+    <label>FTP (W)<input type="number" min="50" max="600" value="${cfg.ftp}" data-cfg="ftp"></label>
+    <label>Max heart rate (bpm)<input type="number" min="100" max="230" value="${cfg.maxHr}" data-cfg="maxHr"></label>
+    <label>Auto-pause after not pedalling for (s)<input type="number" min="2" max="60" value="${cfg.stall}" data-cfg="stall"></label>
+    <p class="mute">Everything is stored in this browser's localStorage. Clearing site data deletes your history.</p></div>`,
+};
+function workoutCard(w) {
+  const i = workouts.indexOf(w);
+  return `<div class="card"><div class="row"><b style="flex:1">${esc(w.name)}</b><span class="mute">${fmt(wDur(w))} · TSS ${Math.round(wTss(w))}</span></div>
+    <div style="margin:8px 0">${workoutSvg(w, { h: 60 })}</div>
+    <div class="row"><button class="primary" data-start="${i}" ${dev.trainer || dev.sim ? '' : 'disabled title="Connect a trainer or use the simulator"'}>Start</button><button data-detail="${i}">Details</button></div></div>`;
+}
+function workoutDetail(w) {
+  const i = workouts.indexOf(w);
+  return `<div class="card"><div class="row"><button data-detail="">← Back</button><h2 style="margin:0;flex:1">${esc(w.name)}</h2><button data-del="${i}">Remove</button></div>
+    <p class="mute">${esc(w.author)} ${esc(w.description)}</p>${workoutSvg(w, { h: 180 })}
+    <table style="margin-top:12px">${w.blocks.map((b) => `<tr><td>${esc(blockLabel(b))}</td><td>${fmt(b.dur)}</td><td>${b.p0 === b.p1 ? Math.round(b.p0 * cfg.ftp) : Math.round(b.p0 * cfg.ftp) + '→' + Math.round(b.p1 * cfg.ftp)} W</td></tr>`).join('')}</table></div>`;
+}
+function sessionDetail(s) {
+  const hrs = s.h.filter((x) => x), avgHr = hrs.length ? Math.round(hrs.reduce((a, b) => a + b, 0) / hrs.length) : null;
+  return `<div class="card"><div class="row"><button data-open="">← Back</button><h2 style="margin:0;flex:1">${esc(s.name)}</h2><button data-act="tcx">Export TCX</button><button data-act="delsession">Delete</button></div>
+    <p class="mute">${new Date(s.start).toLocaleString()} · FTP ${s.ftp} W</p></div>
+    <div class="tiles" style="margin-bottom:12px">${tile('Duration', fmt(s.dur))}${tile('Avg power', Math.round(s.avgP), 'W')}${tile('NP', Math.round(s.np), 'W')}${tile('IF', s.if.toFixed(2))}${tile('TSS', Math.round(s.tss))}${tile('Avg HR', avgHr, 'bpm')}</div>
+    <div class="card"><h3 style="margin-top:0">Power <span class="mute" style="font-weight:400">(target in orange, heart rate in red)</span></h3>
+      ${lineSvg([{ v: s.t, c: 'var(--acc)' }, { v: s.p, c: 'var(--fg)' }, { v: s.h, c: 'var(--z6)' }])}</div>
+    <div class="grid"><div class="card"><h3 style="margin-top:0">Power zones</h3>${zoneBars(s.p, (p) => zoneOf(p / s.ftp), ZN, 'z')}</div>
+      <div class="card"><h3 style="margin-top:0">Heart rate zones</h3>${zoneBars(s.h, (h) => hrZoneOf(h / s.maxHr), ['Easy', 'Endurance', 'Tempo', 'Threshold', 'Max'], 'z')}</div></div>`;
+}
+
+// ---------- events ----------
+document.addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-go],[data-act],[data-start],[data-detail],[data-open],[data-del],[data-mode]'); if (!t) return;
+  const d = t.dataset;
+  if (d.mode) return setMode(d.mode);
+  if (d.go) { view = d.go; openId = null; openWorkout = null }
+  else if (d.start != null) startSession(workouts[+d.start]);
+  else if (d.detail != null) { openWorkout = d.detail === '' ? null : +d.detail; view = 'workouts' }
+  else if (d.open != null) openId = d.open === '' ? null : +d.open;
+  else if (d.del != null) { workouts.splice(+d.del, 1); save('oc.workouts', workouts); openWorkout = null }
+  else switch (d.act) {
+    case 'trainer': try { await connectTrainer() } catch (err) { if (err.name !== 'NotFoundError') alert('Trainer connection failed: ' + err.message) } break;
+    case 'hrm': try { await connectHrm() } catch (err) { if (err.name !== 'NotFoundError') alert('HRM connection failed: ' + err.message) } break;
+    case 'pm': try { await connectPm() } catch (err) { if (err.name !== 'NotFoundError') alert('Power meter connection failed: ' + err.message) } break;
+    case 'free': startFreeRide(); return;
+    case 'up': adjust(1); return;
+    case 'down': adjust(-1); return;
+    case 'sim': dev.sim = !dev.sim; dev.simPedal = true; if (!dev.sim) live.power = live.cad = live.hr = null; break;
+    case 'simpedal': dev.simPedal = !dev.simPedal; break;
+    case 'pause': case 'resume': case 'skip': case 'stop': sessionEvent(d.act); return;
+    case 'tcx': { const s = load('oc.sessions', []).find((x) => x.id === openId); download(`${new Date(s.start).toISOString().slice(0, 10)}-${s.name.replace(/\W+/g, '_')}.tcx`, tcx(s)); break }
+    case 'delsession': if (confirm('Delete this session? This cannot be undone.')) { save('oc.sessions', load('oc.sessions', []).filter((x) => x.id !== openId)); openId = null } break;
+  }
+  render();
+});
+document.addEventListener('change', async (e) => {
+  const t = e.target;
+  if (t.dataset.cfg) { cfg[t.dataset.cfg] = Math.max(+t.min, Math.min(+t.max, +t.value || 0)); save('oc.cfg', cfg) }
+  if (t.dataset.act === 'zwo') {
+    const errs = [];
+    for (const f of t.files) { try { const w = parseZwo(await f.text(), f.name); workouts = workouts.filter((x) => x.file !== w.file); workouts.push(w) } catch (err) { errs.push(`${f.name}: ${err.message}`) } }
+    save('oc.workouts', workouts); if (errs.length) alert('Skipped:\n' + errs.join('\n'));
+  }
+  render();
+});
+addEventListener('keydown', (e) => {
+  if (!S || e.target.closest?.('input')) return;
+  if (e.code === 'ArrowUp' || e.code === 'ArrowDown') { e.preventDefault(); adjust(e.code === 'ArrowUp' ? 1 : -1) }
+  else if (e.code === 'Space') { e.preventDefault(); sessionEvent(S.state === 'paused' ? 'resume' : 'pause') }
+});
+addEventListener('beforeunload', (e) => { if (S && S.state !== 'waiting') e.preventDefault() });
+setInterval(() => { if (view === 'home') render() }, 1000);
+render();
+</script>
+</body>
+</html>
