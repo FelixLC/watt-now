@@ -141,7 +141,7 @@ function zoneBars(values, zoneFn, names, prefix) {
 
 // ---------- BLE (port of ble/ftms, ble/hrs) ----------
 const live = { power: null, cad: null, hr: null, seen: { t: 0, h: 0 } };
-const dev = { trainer: null, hrm: null, pm: null, cp: null, sim: false, simPedal: true, lastErg: null, lastErgAt: 0, lastCtl: '', lastCtlAt: 0 };
+const dev = { trainer: null, hrm: null, pm: null, click: null, clickRaw: '', cp: null, sim: false, simPedal: true, lastErg: null, lastErgAt: 0, lastCtl: '', lastCtlAt: 0 };
 function parseIndoorBike(dv) {
   const f = dv.getUint16(0, true); let o = 2; const r = {};
   if (!(f & 1)) o += 2;          // instantaneous speed
@@ -178,6 +178,45 @@ async function connectHrm() {
   await c.startNotifications();
   d.addEventListener('gattserverdisconnected', () => { dev.hrm = null; render() });
   dev.hrm = d; render();
+}
+// Zwift Click / Play / Ride buttons. Community reverse-engineered protocol (zwiftplay, SwiftControl): writing
+// "RideOn" with no public key puts the controller in unencrypted mode. Button messages arrive on 0x0002 as a type
+// byte + protobuf. 0x37 (Click v1): field 1 = plus, field 2 = minus, 0 = pressed. 0x23 (Ride, Click v2): field 1 =
+// button bitmap, a cleared bit = pressed. ponytail: unverified on real hardware; dev.clickRaw shows raw bytes to debug.
+const ZW = (n) => `0000000${n}-19ca-4651-86e5-fa29dcdd09d1`;
+const RIDE_UP = 0x2000 | 0x200 | 0x2 | 0x10, RIDE_DOWN = 0x4000 | 0x400 | 0x8 | 0x40;  // shift up/down R+L, plus up/A and down/Y
+function pbVarints(bytes) {  // protobuf varint fields only: {field: value}
+  const out = {}; let i = 0;
+  const vi = () => { let v = 0, m = 1, b; do { b = bytes[i++]; v += (b & 0x7f) * m; m *= 128 } while (b & 0x80 && i < bytes.length); return v };
+  while (i < bytes.length) { const k = vi(), f = k >> 3, w = k & 7; if (w === 0) out[f] = vi(); else if (w === 2) i += vi(); else break }
+  return out;
+}
+// -> {up, down} pressed now, or null for non-button messages
+function parseClick(dv) {
+  const b = [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)], pb = pbVarints(b.slice(1));
+  if (b[0] === 0x37) return { up: pb[1] === 0, down: pb[2] === 0 };
+  if (b[0] === 0x23 && pb[1] != null) return { up: (~pb[1] & RIDE_UP) !== 0, down: (~pb[1] & RIDE_DOWN) !== 0 };
+  return null;
+}
+let clickPrev = { up: false, down: false };
+function onClick(dv) {
+  dev.clickRaw = [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)].map((x) => x.toString(16).padStart(2, '0')).join(' ');
+  console.log('click', dev.clickRaw);
+  const c = parseClick(dv); if (!c) return;
+  const dir = c.up && !clickPrev.up ? 1 : c.down && !clickPrev.down ? -1 : 0;  // act on press, not hold or release
+  clickPrev = c;
+  if (dir && S) { if (S.mode === 'grade') shift(dir); else adjust(dir) }
+}
+async function connectClick() {
+  const d = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'Zwift' }], optionalServices: [ZW(1), 'battery_service'] });
+  const svc = await (await d.gatt.connect()).getPrimaryService(ZW(1));
+  const notify = await svc.getCharacteristic(ZW(2)), ind = await svc.getCharacteristic(ZW(4)), rx = await svc.getCharacteristic(ZW(3));
+  notify.addEventListener('characteristicvaluechanged', (e) => onClick(e.target.value));
+  ind.addEventListener('characteristicvaluechanged', (e) => console.log('click handshake', new TextDecoder().decode(e.target.value)));
+  await notify.startNotifications(); await ind.startNotifications();
+  await rx.writeValueWithResponse(new TextEncoder().encode('RideOn'));
+  d.addEventListener('gattserverdisconnected', () => { dev.click = null; render() });
+  dev.click = d; render();
 }
 // Power meter over the Cycling Power Service: when connected it is the power source (trainer power is often less accurate).
 async function connectPm() {
@@ -330,6 +369,7 @@ const V = {
       <div class="row">
         <button class="primary" data-act="trainer" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.trainer ? 'Trainer: ' + esc(dev.trainer.name) : 'Connect trainer (FTMS)'}</button>
         <button data-act="hrm" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.hrm ? 'HRM: ' + esc(dev.hrm.name) : 'Connect heart rate'}</button>
+        <button data-act="click" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.click ? 'Click: ' + esc(dev.click.name) : 'Connect Zwift Click'}</button>
         <button data-act="pm" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.pm ? 'Power meter: ' + esc(dev.pm.name) : 'Connect power meter'}</button>
         <button data-act="sim">${dev.sim ? 'Stop simulator' : 'Use simulator'}</button>
         <button data-act="free" ${dev.trainer || dev.sim ? '' : 'disabled'}>Free ride</button>
@@ -378,6 +418,7 @@ const V = {
         ${S.state === 'paused' ? `<button class="primary" data-act="resume">Resume</button>` : `<button data-act="pause" ${S.state === 'waiting' ? 'disabled' : ''}>Pause</button>`}
         ${wk ? `<button data-act="skip" ${S.state === 'waiting' ? 'disabled' : ''}>Skip block</button>` : ''}
         <button data-act="stop">Stop and save</button>
+        ${dev.click ? `<span class="mute" title="Last Zwift Click message">Click: ${dev.clickRaw || 'connected'}</span>` : `<button data-act="click" ${'bluetooth' in navigator ? '' : 'disabled'}>Connect Zwift Click</button>`}
         ${dev.sim ? `<button data-act="simpedal">${dev.simPedal ? 'Sim: stop pedalling' : 'Sim: pedal'}</button>` : ''}
       </div>`;
   },
@@ -441,6 +482,7 @@ document.addEventListener('click', async (e) => {
   else switch (d.act) {
     case 'trainer': try { await connectTrainer() } catch (err) { if (err.name !== 'NotFoundError') alert('Trainer connection failed: ' + err.message) } break;
     case 'hrm': try { await connectHrm() } catch (err) { if (err.name !== 'NotFoundError') alert('HRM connection failed: ' + err.message) } break;
+    case 'click': try { await connectClick() } catch (err) { if (err.name !== 'NotFoundError') alert('Zwift Click connection failed: ' + err.message) } break;
     case 'pm': try { await connectPm() } catch (err) { if (err.name !== 'NotFoundError') alert('Power meter connection failed: ' + err.message) } break;
     case 'free': startFreeRide(); return;
     case 'up': adjust(1); return;
