@@ -200,24 +200,37 @@ function parseClick(dv) {
 }
 let clickPrev = { up: false, down: false };
 function onClick(dv) {
-  dev.clickRaw = [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)].map((x) => x.toString(16).padStart(2, '0')).join(' ');
-  console.log('click', dev.clickRaw);
+  dev.clickRaw = hex(dv);
+  if (clickLog.at(-1)?.startsWith('msg ')) clickLog.pop(); clog('msg ' + dev.clickRaw);
   const c = parseClick(dv); if (!c) return;
   const dir = c.up && !clickPrev.up ? 1 : c.down && !clickPrev.down ? -1 : 0;  // act on press, not hold or release
   clickPrev = c;
   if (dir && S) { if (S.mode === 'grade') shift(dir); else adjust(dir) }
 }
+// Visible connection log: a Click can't be debugged from the bike with devtools.
+const clickLog = [], clog = (m) => { clickLog.push(m); clickLog.splice(0, clickLog.length - 8); console.log('click:', m); render() };
+// Older firmware (Click v1, Play) uses the 128-bit service, newer (Ride, Click v2) the 16-bit 0xFC82; same characteristics.
+const ZW_SERVICES = ['0000fc82-0000-1000-8000-00805f9b34fb', ZW(1)];
 async function connectClick() {
-  const d = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'Zwift' }], optionalServices: [ZW(1), 'battery_service'] });
-  const svc = await (await d.gatt.connect()).getPrimaryService(ZW(1));
-  const notify = await svc.getCharacteristic(ZW(2)), ind = await svc.getCharacteristic(ZW(4)), rx = await svc.getCharacteristic(ZW(3));
-  notify.addEventListener('characteristicvaluechanged', (e) => onClick(e.target.value));
-  ind.addEventListener('characteristicvaluechanged', (e) => console.log('click handshake', new TextDecoder().decode(e.target.value)));
-  await notify.startNotifications(); await ind.startNotifications();
-  await rx.writeValueWithResponse(new TextEncoder().encode('RideOn'));
-  d.addEventListener('gattserverdisconnected', () => { dev.click = null; render() });
-  dev.click = d; render();
+  clickLog.length = 0;
+  const d = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'Zwift' }, { manufacturerData: [{ companyIdentifier: 0x094a }] }], optionalServices: [...ZW_SERVICES, 'battery_service'] });
+  clog(`picked "${d.name}"`);
+  try {
+    const gatt = await d.gatt.connect(); clog('connected');
+    let svc = null;
+    for (const u of ZW_SERVICES) { try { svc = await gatt.getPrimaryService(u); clog('service ' + u.slice(4, 8)); break } catch { } }
+    if (!svc) { const all = await gatt.getPrimaryServices().catch(() => []); throw new Error('no Zwift service; visible: ' + (all.map((x) => x.uuid.slice(4, 8)).join(', ') || 'none')) }
+    const notify = await svc.getCharacteristic(ZW(2)), ind = await svc.getCharacteristic(ZW(4)), rx = await svc.getCharacteristic(ZW(3));
+    notify.addEventListener('characteristicvaluechanged', (e) => onClick(e.target.value));
+    ind.addEventListener('characteristicvaluechanged', (e) => clog('reply ' + hex(e.target.value)));
+    await notify.startNotifications(); await ind.startNotifications(); clog('subscribed');
+    const hello = new TextEncoder().encode('RideOn');
+    await (rx.properties.write ? rx.writeValueWithResponse(hello) : rx.writeValueWithoutResponse(hello)); clog('sent RideOn');
+    d.addEventListener('gattserverdisconnected', () => { dev.click = null; clog('disconnected') });
+    dev.click = d; render();
+  } catch (err) { clog('failed: ' + err.message); d.gatt.disconnect(); }
 }
+const hex = (dv) => [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)].map((x) => x.toString(16).padStart(2, '0')).join(' ');
 // Power meter over the Cycling Power Service: when connected it is the power source (trainer power is often less accurate).
 async function connectPm() {
   const d = await navigator.bluetooth.requestDevice({ filters: [{ services: ['cycling_power'] }] });
@@ -369,7 +382,7 @@ const V = {
       <div class="row">
         <button class="primary" data-act="trainer" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.trainer ? 'Trainer: ' + esc(dev.trainer.name) : 'Connect trainer (FTMS)'}</button>
         <button data-act="hrm" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.hrm ? 'HRM: ' + esc(dev.hrm.name) : 'Connect heart rate'}</button>
-        <button data-act="click" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.click ? 'Click: ' + esc(dev.click.name) : 'Connect Zwift Click'}</button>
+        <button data-act="click" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.click ? 'Click: ' + esc(dev.click.name) : 'Connect Zwift Click'}</button>${clickLog.length ? `<span class="mute">Click: ${esc(clickLog.join(' › '))}</span>` : ''}
         <button data-act="pm" ${'bluetooth' in navigator ? '' : 'disabled'}>${dev.pm ? 'Power meter: ' + esc(dev.pm.name) : 'Connect power meter'}</button>
         <button data-act="sim">${dev.sim ? 'Stop simulator' : 'Use simulator'}</button>
         <button data-act="free" ${dev.trainer || dev.sim ? '' : 'disabled'}>Free ride</button>
@@ -418,7 +431,7 @@ const V = {
         ${S.state === 'paused' ? `<button class="primary" data-act="resume">Resume</button>` : `<button data-act="pause" ${S.state === 'waiting' ? 'disabled' : ''}>Pause</button>`}
         ${wk ? `<button data-act="skip" ${S.state === 'waiting' ? 'disabled' : ''}>Skip block</button>` : ''}
         <button data-act="stop">Stop and save</button>
-        ${dev.click ? `<span class="mute" title="Last Zwift Click message">Click: ${dev.clickRaw || 'connected'}</span>` : `<button data-act="click" ${'bluetooth' in navigator ? '' : 'disabled'}>Connect Zwift Click</button>`}
+        ${dev.click ? '' : `<button data-act="click" ${'bluetooth' in navigator ? '' : 'disabled'}>Connect Zwift Click</button>`}${clickLog.length ? `<span class="mute">Click: ${esc(clickLog.join(' › '))}</span>` : ''}
         ${dev.sim ? `<button data-act="simpedal">${dev.simPedal ? 'Sim: stop pedalling' : 'Sim: pedal'}</button>` : ''}
       </div>`;
   },
