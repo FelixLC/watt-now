@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenCycling Web</title>
+<title>Watt Now</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--fg:#14161a;--mute:#6b7280;--line:#e3e6ea;--acc:#ff5a1f;--ok:#16a34a;--warn:#d97706;
 --z1:#9ca3af;--z2:#3b82f6;--z3:#22c55e;--z4:#eab308;--z5:#f97316;--z6:#ef4444}
@@ -39,7 +39,7 @@ table{width:100%;border-collapse:collapse}td{padding:4px 6px;border-bottom:1px s
 </style>
 </head>
 <body>
-<header><b>OpenCycling</b><nav class="row" id="nav"></nav><span style="flex:1"></span><span id="dev" class="mute"></span></header>
+<header><b>Watt Now</b><nav class="row" id="nav"></nav><span style="flex:1"></span><span id="dev" class="mute"></span></header>
 <main id="app"></main>
 <script>
 // ponytail: single-file port of the core loop (devices, .zwo, ERG session, history, TCX).
@@ -105,7 +105,7 @@ const blockLabel = (b) => { if (b.label) return b.label; const a = zoneOf(b.p0),
 const wDur = (w) => w.blocks.reduce((a, b) => a + b.dur, 0);
 const wTss = (w) => { const p = []; for (const b of w.blocks) for (let t = 0; t < b.dur; t++) p.push((b.p0 + (b.p1 - b.p0) * t / b.dur) * cfg.ftp); return derive(p, cfg.ftp).tss };
 
-const SAMPLE = `<workout_file><name>Sweet Spot 3x8</name><author>OpenCycling Web</author><description>Bundled sample: three 8-minute sweet spot efforts.</description><sportType>bike</sportType><workout><Warmup Duration="600" PowerLow="0.45" PowerHigh="0.75"/><IntervalsT Repeat="3" OnDuration="480" OffDuration="240" OnPower="0.9" OffPower="0.55"/><Cooldown Duration="300" PowerLow="0.65" PowerHigh="0.4"/></workout></workout_file>`;
+const SAMPLE = `<workout_file><name>Sweet Spot 3x8</name><author>Watt Now</author><description>Bundled sample: three 8-minute sweet spot efforts.</description><sportType>bike</sportType><workout><Warmup Duration="600" PowerLow="0.45" PowerHigh="0.75"/><IntervalsT Repeat="3" OnDuration="480" OffDuration="240" OnPower="0.9" OffPower="0.55"/><Cooldown Duration="300" PowerLow="0.65" PowerHigh="0.4"/></workout></workout_file>`;
 let workouts = (load('oc.workouts', null) ?? [parseZwo(SAMPLE, 'sample.zwo')]).map((w) => { try { return w.xml ? parseZwo(w.xml, w.file) : w } catch { return w } });
 
 // ---------- charts ----------

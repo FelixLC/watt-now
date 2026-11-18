@@ -1,4 +1,4 @@
-# OpenCycling Web
+# Watt Now
 
 A browser port of [OpenCycling](https://github.com/TheElysium/opencycling), in one HTML file. It also borrows a few ideas from [Auuki](https://github.com/dvmarinoff/Auuki).
 
