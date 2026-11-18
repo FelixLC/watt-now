@@ -4,6 +4,14 @@ A browser port of [OpenCycling](https://github.com/TheElysium/opencycling), in o
 
 It runs structured `.zwo` workouts in ERG mode on a Bluetooth smart trainer (FTMS), records each session in the browser, and exports TCX.
 
+<p>
+  <img src="screenshots/workout.png" alt="A workout session: block countdown, targets, zoomed block chart, power and cadence gauges" width="68%">
+  <img src="screenshots/workout-phone.png" alt="The same session at phone width" width="25%">
+</p>
+<p><img src="screenshots/free-ride-gears.png" alt="Free ride in grade mode with virtual gears" width="68%"></p>
+
+The values in these screenshots are simulated.
+
 ## Run
 
 Web Bluetooth needs Chrome or Edge on desktop or Android, and an https or localhost origin.
