@@ -17,7 +17,8 @@ Then open http://localhost:8765. No trainer? Click **Use simulator**.
 ## Features
 
 - Trainer (FTMS), heart rate strap (HRS) and power meter (CPS) over Web Bluetooth. A power meter replaces the trainer's power reading.
-- `.zwo` workouts: pedal to start, auto-pause when you stop pedalling, a 15 s ramp back up on resume, skip block, audio cues.
+- `.zwo` workouts: pedal to start, auto-pause when you stop pedalling, a 5 s ramp back up on resume, skip block, audio cues.
+- A focus card for the current block (big countdown, targets, next block) and power and cadence gauges against the target.
 - Intensity bias during a workout (↑/↓), Space to pause and resume, screen kept awake.
 - Free ride in ERG, grade or resistance mode, with 24 virtual gears in grade mode (for a single-speed like the Zwift Cog).
 - Zwift Click / Play / Ride buttons: shift gears in grade mode, adjust intensity or watts otherwise (reverse-engineered protocol, unencrypted mode).
@@ -29,6 +30,14 @@ Everything is stored in the browser's localStorage.
 
 From OpenCycling: training plans, FTP ramp test, webcam aero detection, Strava upload, Bluetooth auto-reconnect.
 From Auuki: FIT recording, ANT+, intervals.icu, PWA install.
+
+## Credits
+
+- [OpenCycling](https://github.com/TheElysium/opencycling) by TheElysium (GPL-3.0): the session state machine, auto-pause and ramp logic, metrics and workout model are ported from its Rust and Svelte code.
+- [Auuki](https://github.com/dvmarinoff/Auuki) by dvmarinoff (AGPL-3.0): the ideas for the power meter source, free ride modes, intensity bias, keyboard controls and screen wake lock, and its FTMS simulation defaults. Its code was used as a reference; none is copied here.
+- [zwiftplay](https://github.com/ajchellew/zwiftplay) and [BikeControl](https://github.com/OpenBikeControl/bikecontrol): the community reverse engineering of the Zwift Click, Play and Ride protocol.
+
+Not affiliated with Zwift. Zwift, Zwift Click and Zwift Cog are trademarks of Zwift, Inc.
 
 ## License
 
